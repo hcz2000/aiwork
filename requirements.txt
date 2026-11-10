@@ -2,7 +2,7 @@ gradio==4.44.1
 openai==3.42.0
 wikipedia
 twitter-api-client
-python-dotenv=1.2.4
+python-dotenv==1.2.4
 pytest==9.2.0
 youtube-transcript-api==1.2.4
 py-trees==2.6.0
@@ -16,9 +16,15 @@ prefect==3.2.7
 googlemaps
 fal-client==0.14.1
 pyautogui==0.9.54
-pymupdf==2.0.0
+pymupdf==1.26.5
 azure-search-documents
 jinja2==3.1.6
 groq==1.7.0
 anthropic==2.3.0
 tiktoken==0.14.0
+audioop-lts
+huggingface_hub==0.36.2
+peewee==4.5.3
+starlette==1.10.0
+fastapi==0.162.0
+uvicorn==0.54.0
