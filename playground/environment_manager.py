@@ -20,7 +20,7 @@ class EnvironmentManager:
             self.create_virtual_env()
 
     def create_virtual_env(self):
-        subprocess.check_call([sys.executable, "-m", "virtualenv", self.env_path])
+        subprocess.check_call([sys.executable, "-m", "venv", self.env_path])
         print(f"Created virtual environment at {self.env_path}")
 
     def install_requirements(self, requirements_file="code_env_requirements.txt"):
