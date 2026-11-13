@@ -91,6 +91,7 @@ semantic_manager = SemanticManager()
 env_manager = EnvironmentManager()
 env_manager.install_requirements()
 
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 logger = Logger("logs.txt")
 logger.reset_logs()
 
