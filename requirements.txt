@@ -113,9 +113,6 @@ PyGetWindow==0.0.9
 Pygments==2.21.0
 PyMsgBox==2.0.1
 pymupdf==1.28.2
-pyobjc-core==13.0
-pyobjc-framework-Cocoa==13.0
-pyobjc-framework-Quartz==13.0
 pyparsing==3.3.3
 pyperclip==1.11.0
 PyRect==0.2.0
