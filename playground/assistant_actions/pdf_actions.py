@@ -1,4 +1,4 @@
-import fitz  # PyMuPDF
+import pymupdf
 from PIL import Image
 import io
 import os
