@@ -4,7 +4,9 @@ import sys
 from datetime import datetime
 import time
 import pyautogui
+from dotenv import load_dotenv
 
+load_dotenv()
 
 class EnvironmentManager:
     def __init__(self, base_path="environments", env_name="env"):
@@ -20,7 +22,8 @@ class EnvironmentManager:
             self.create_virtual_env()
 
     def create_virtual_env(self):
-        subprocess.check_call([sys.executable, "-m", "venv", self.env_path])
+        venv_cmd=os.getenv('VENV_CMD')
+        subprocess.check_call([sys.executable, "-m", venv_cmd, self.env_path])
         print(f"Created virtual environment at {self.env_path}")
 
     def install_requirements(self, requirements_file="code_env_requirements.txt"):
