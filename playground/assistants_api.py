@@ -417,7 +417,7 @@ class AssistantsAPI:
             def __exit__(self, exc_type, exc_val, exc_tb):
                 # 等待后台线程完成
                 if self._worker_thread:
-                    self._worker_thread.join(timeout=60)
+                    self._worker_thread.join(timeout=180)
                 return False
 
             def __iter__(self):
@@ -426,7 +426,7 @@ class AssistantsAPI:
             def __next__(self):
                 # 从内部队列读取文本，超时则结束
                 try:
-                    item = self._text_queue.get(timeout=30.0)
+                    item = self._text_queue.get(timeout=120.0)
                 except queue.Empty:
                     raise StopIteration
                 if item is None:
