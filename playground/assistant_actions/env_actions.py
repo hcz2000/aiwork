@@ -18,7 +18,7 @@ def run_python_code(code, filename=None):
             - code_errors (str): Any errors encountered during the code execution.
     """
     env_manager = EnvironmentManager()
-    code_output, code_errors = env_manager.run_ode(code, filename=filename)
+    code_output, code_errors = env_manager.run_code(code, filename=filename)
     return code_output, code_errors
 
 
