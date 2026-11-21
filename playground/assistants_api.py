@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from peewee import SqliteDatabase, Model, TextField, FloatField, IntegrityError
 from dotenv import load_dotenv
+from playground.global_values import GlobalValues
 from playground.llms import get_llm_client
 
 load_dotenv()
@@ -38,6 +39,100 @@ class Assistant:
         self.response_format = response_format
         self.temperature = temperature
         self.top_p = top_p
+
+
+    # ===================== 原生工具 file_search 的模拟层 =====================
+    # OpenAI Assistants API 的 file_search 是「服务端原生工具」：由 OpenAI 在自己的向量库里检索。
+    # 这里用「本地文件系统递归搜索」做等价模拟,声明侧（create_assistant 传入的 tools）保持原样持久化,
+    # 只在真正调 LLM 前由chat_completion_tools() 换成等价的 function 影子 schema。
+
+    #: OpenAI 原生工具类型全集
+    NATIVE_TOOL_TYPES = {"file_search", "code_interpreter"}
+
+    #: 单次搜索返回给模型的最大条目数（命中过多会撑爆上下文，故截断）
+    FILE_SEARCH_MAX_RESULTS = 50
+
+    @staticmethod
+    def file_search_schema():
+        """file_search 的影子 schema：把原生工具翻译成 Chat Completions 认识的 function。"""
+        return {
+            "type": "function",
+            "function": {
+                "name": "file_search",
+                "description": (
+                    "Search files by name inside the assistant working folder. "
+                    "Case-insensitive substring match on file names only (file content is not read). "
+                    "Returns a JSON object: {total: N, truncated: bool, results: [paths]}. "
+                    "If results is empty, the file is really not in the working folder - do not retry the same query."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Filename keyword, e.g. 'report'. Substring, case-insensitive.",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+
+    def chat_completion_tools(self):
+        """
+        生成真正传给 chat.completions.create() 的 tools 列表。
+        - 普通 function / action 工具：原样透传（保持既有行为）
+        - 原生工具 file_search：替换为等价的 function 影子 schema
+        - 其它原生工具类型（如 code_interpreter）：暂无模拟实现，跳过并告警
+        """
+        llm_tools = []
+        for tool in (self.tools or []):
+            tool_type = tool.get("type") if isinstance(tool, dict) else None
+            if tool_type in self.NATIVE_TOOL_TYPES:
+                if tool_type == "file_search":
+                    llm_tools.append(self.file_search_schema())
+                else:
+                    print("[WARN] 原生工具 %s 暂无模拟实现，本次不传给模型" % tool_type)
+                continue
+            llm_tools.append(tool)
+        return llm_tools
+
+    @staticmethod
+    def search_files(query: str) -> list:
+        """在 ASSISTANTS_WORKING_FOLDER 下递归搜索文件名（大小写不敏感子串匹配），返回路径列表。"""
+        # 搜索根每次调用现取类属性，不提成模块级常量：GlobalValues.set_value() 运行期改目录才能立刻生效
+        folder = GlobalValues.ASSISTANTS_WORKING_FOLDER
+        results = []
+        if not folder or not os.path.exists(folder):
+            return results
+        for root, dirs, files in os.walk(folder):
+            for filename in files:
+                if query.lower() in filename.lower():
+                    results.append(os.path.join(root, filename))
+        return results
+
+    @staticmethod
+    def build_file_search_payload(query: str) -> str:
+        """执行搜索并组装喂回模型的 JSON 载荷（带 total / truncated，模型据此判断是否换关键词）。"""
+        query = str(query or "").strip()
+        if not query:
+            return json.dumps({"total": 0, "truncated": False, "results": [],
+                               "note": "query is required"}, ensure_ascii=False)
+        results = Assistant.search_files(query)
+        total = len(results)
+        truncated = total > Assistant.FILE_SEARCH_MAX_RESULTS
+        if truncated:
+            results = results[:Assistant.FILE_SEARCH_MAX_RESULTS]
+        return json.dumps({"total": total, "truncated": truncated, "results": results},
+                          ensure_ascii=False)
+
+    def search_file(self, query: str) -> str:
+        """
+        兼容入口：若 ActionsManager 以 "search_file" 名字注册过本方法，行为与原生 file_search 一致。
+
+        返回 JSON 字符串（而非 ToolResponse），由 _serialize_result 原样作为 tool 消息 content 喂回模型。
+        """
+        return self.build_file_search_payload(query)
 
 
 class StreamWrapper:
@@ -89,6 +184,9 @@ class AssistantsAPI:
         5. 文件操作（upload/list/retrieve/delete）暂存为桩函数（stub）
         6. 保持所有方法签名不变，确保 main.py 等其他调用方无需修改
     """
+
+    #: 由模拟层内部执行、不走 ActionsManager 的原生工具名
+    _NATIVE_TOOL_NAMES = {"file_search"}
 
     def __init__(self):
         self.client = get_llm_client()
@@ -202,11 +300,30 @@ class AssistantsAPI:
         all_tools = (tools or []) + (actions or [])
 
         assistant = Assistant(assistant_id, name, instructions, model, all_tools, response_format, temperature, top_p)
+
         self._assistants[assistant_id] = assistant
         # 持久化到数据库
         self._save_assistant_to_db(assistant)
 
         return assistant
+
+    def _execute_native_tool(self, tool_name, tool_args):
+        """
+        执行原生工具（file_search）的模拟实现。
+
+        原生工具没有 action["pointer"]，ActionsManager 查不到，
+        所以必须在 _execute_tool 查表之前拦截到这里。
+        """
+        if tool_name != "file_search":
+            return "[Error] 未支持的原生工具: %s" % tool_name
+
+        args = tool_args or {}
+        # 容忍模型把参数名写成 keyword / q / search_query 等变体
+        query = (args.get("query") or args.get("keyword") or args.get("q")
+                 or args.get("search_query") or "")
+        payload = Assistant.build_file_search_payload(query)
+        print("[DEBUG-NATIVE] file_search query=%r -> %s" % (query, payload[:200]))
+        return payload
 
     def _execute_tool(self, tool_name, raw_args):
         """
@@ -214,16 +331,13 @@ class AssistantsAPI:
 
         执行工具调用，统一处理 JSON 解析、self 参数过滤和智能调用策略选择。
         """
-        # 【调试】打印 LLM 返回的原始参数字符串，方便排查 JSON 解析失败问题
         print("[DEBUG] _execute_tool: tool=%s, raw_args=%s" % (tool_name, repr(raw_args)))
 
         tool_args = None
         try:
             tool_args = json.loads(raw_args)
-            # 【调试】打印成功解析后的字典结构
             print("[DEBUG] json.loads 成功: %s" % repr(tool_args))
         except (json.JSONDecodeError, TypeError) as e:
-            # 尝试修复常见格式问题
             print("[WARN] JSON解析失败! raw_args=%s" % repr(raw_args))
             print("[WARN] 异常详情: %s" % e)
             tool_args = {}
@@ -239,6 +353,11 @@ class AssistantsAPI:
 
         # 【调试】打印最终传入工具的参数字典
         print("[DEBUG] 准备调用工具: name=%s, args=%s" % (tool_name, repr(tool_args)))
+
+        # 原生工具不在 ActionsManager 里注册，必须在查表之前接管。
+        if tool_name in self._NATIVE_TOOL_NAMES:
+            print("[DEBUG] 命中原生工具模拟层: %s" % tool_name)
+            return self._execute_native_tool(tool_name, tool_args)
 
         # 查找工具 - 使用懒加载的 actions_manager
         action = self.actions_manager.get_action(tool_name)
@@ -313,8 +432,6 @@ class AssistantsAPI:
             errors_str = "; ".join(last_errors)
             return "[Error] 工具执行失败: %s. 函数: %s" % (errors_str, action_func.__name__)
 
-
-        # 【调试】打印返回值类型
         print("[DEBUG] 工具返回值类型: %s, 值: %s" % (type(result).__name__, repr(result)[:200]))
 
         # 安全序列化返回值
@@ -481,8 +598,11 @@ class AssistantsAPI:
                     }
 
                     # 传递 tools（如果定义了）
-                    if assistant.tools:
-                        kwargs["tools"] = assistant.tools
+                    # 原生工具（file_search）在这里被翻译成 function 影子 schema，
+                    # 因为 Chat Completions 端点不认识 {"type": "file_search"}。
+                    llm_tools = assistant.chat_completion_tools()
+                    if llm_tools:
+                        kwargs["tools"] = llm_tools
 
                     # 传递 response_format（如果定义了）
                     if assistant.response_format:
@@ -686,6 +806,8 @@ class AssistantsAPI:
         assistant_top_p,
     ):
         """更新助手配置。"""
+        print("[INFO] update_assistant called.")
+
         if assistant_id not in self._assistants:
             print("[WARN] ... skipping update.")
             return None
@@ -830,9 +952,3 @@ def __getattr__(name):
             _api = AssistantsAPI()
         return _api
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
-
-
-# asss = api.list_assistants()
-# for a in asss.data:
-#     if a.name == "Sample Assistant":
-#         api.delete_assistant(a.id)
