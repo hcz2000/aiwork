@@ -1,7 +1,13 @@
-from prefect import flow
+import os
+
 import py_trees
 
 from playground.assistants_api import api
+
+USE_PREFECT = os.environ.get("BTREE_USE_PREFECT", "0") == "1"
+
+if USE_PREFECT:
+    from prefect import flow
 
 
 # Define the FunctionWrapper class
@@ -15,21 +21,34 @@ class FunctionWrapper:
         return self.function(*self.args, **self.kwargs)
 
 
+def resolve_assistant(assistant_name):
+    """按名字取已安装的 assistant；库里没有同名助手时直接抛异常。"""
+    assistant = api.get_assistant_by_name(assistant_name)
+    if assistant is None:
+        raise ValueError(
+            "未找到名为 '%s' 的 assistant，请先在面板 Add Assistant 中创建同名助手。"
+            % assistant_name
+        )
+    return assistant
+
+
 def create_task(action):
-    @flow(name=action.name, description=action.assistant_name, log_prints=True)
     def init_wrapper():
         print(f"Initializing task: {action.name}")
         print(f"Assistant: {action.assistant_name}")
 
-        # action.thread_running = True
-        # action.thread_success = False
-        # action.thread = threading.Thread(target=action.long_running_process)
-        # action.thread.start()
-
-        # action.thread.join()
         action.long_running_process()
 
-    return init_wrapper
+    if not USE_PREFECT:
+        # 默认路径：纯函数包装，全程不 import prefect
+        return init_wrapper
+
+    # 仅在 BTREE_USE_PREFECT=1 时才走 prefect 装饰（flow 已在模块顶部按开关导入）
+    return flow(
+        name=action.name,
+        description=action.assistant_name,
+        log_prints=True,
+    )(init_wrapper)
 
 
 # Define the ActionWithThread class
@@ -51,12 +70,6 @@ class ActionWrapper(py_trees.behaviour.Behaviour):
 
     def initialise(self):
         create_task(self)()
-        # # This is called once each time the behavior is started
-        # print("%s.initialise()" % self.name)
-        # self.thread_running = True
-        # self.thread_success = False
-        # self.thread = threading.Thread(target=self.long_running_process)
-        # self.thread.start()
 
     def long_running_process(self):
         try:
@@ -101,7 +114,7 @@ class ActionWrapper(py_trees.behaviour.Behaviour):
 
 
 def create_assistant_action(action_name, assistant_name, assistant_instructions):
-    assistant = api.get_assistant_by_name(assistant_name)
+    assistant = resolve_assistant(assistant_name)
     function_wrapper = FunctionWrapper(
         api.call_assistant, assistant.id, assistant_instructions
     )
@@ -113,7 +126,7 @@ def create_assistant_action(action_name, assistant_name, assistant_instructions)
 
 
 def create_assistant_condition(condition_name, assistant_name, assistant_instructions):
-    assistant = api.get_assistant_by_name(assistant_name)
+    assistant = resolve_assistant(assistant_name)
     function_wrapper = FunctionWrapper(
         api.call_assistant, assistant.id, assistant_instructions
     )
@@ -128,7 +141,7 @@ def create_assistant_condition(condition_name, assistant_name, assistant_instruc
 def create_assistant_action_on_thread(
     thread, action_name, assistant_name, assistant_instructions
 ):
-    assistant = api.get_assistant_by_name(assistant_name)
+    assistant = resolve_assistant(assistant_name)
     function_wrapper = FunctionWrapper(
         api.call_assistant_with_thread, thread, assistant.id, assistant_instructions
     )
@@ -142,7 +155,7 @@ def create_assistant_action_on_thread(
 def create_assistant_condition_on_thread(
     thread, condition_name, assistant_name, assistant_instructions
 ):
-    assistant = api.get_assistant_by_name(assistant_name)
+    assistant = resolve_assistant(assistant_name)
     function_wrapper = FunctionWrapper(
         api.call_assistant_with_thread, thread, assistant.id, assistant_instructions
     )
